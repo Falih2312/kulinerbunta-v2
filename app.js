@@ -6,8 +6,8 @@
           appName: 'KulinerBunta.id',
           deliveryFee: 5000,
           serviceFee: 1000,
-          supabaseUrl: '',
-          supabaseKey: ''
+          supabaseUrl: 'https://mwxelzxptsbjwhqopuwj.supabase.co',
+          supabaseKey: 'sb_publishable_XjgMtwhOl0p58HDfOZfQOA_D3-4OGSK'
         },
         merchants: [
           {
@@ -159,8 +159,11 @@
           const raw = localStorage.getItem(STORAGE_KEY);
           if (!raw) return JSON.parse(JSON.stringify(DEFAULT_STATE));
           const parsed = JSON.parse(raw);
+          const mergedSettings = { ...DEFAULT_STATE.settings, ...(parsed.settings || {}) };
+          if (!mergedSettings.supabaseUrl) mergedSettings.supabaseUrl = DEFAULT_STATE.settings.supabaseUrl;
+          if (!mergedSettings.supabaseKey) mergedSettings.supabaseKey = DEFAULT_STATE.settings.supabaseKey;
           return {
-            settings: { ...DEFAULT_STATE.settings, ...(parsed.settings || {}) },
+            settings: mergedSettings,
             merchants: Array.isArray(parsed.merchants) ? parsed.merchants : DEFAULT_STATE.merchants,
             menus: Array.isArray(parsed.menus) ? parsed.menus : DEFAULT_STATE.menus,
             couriers: Array.isArray(parsed.couriers) ? parsed.couriers : DEFAULT_STATE.couriers,
@@ -217,6 +220,108 @@
         sbClient = null;
         badge.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30';
         badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Mode Lokal';
+      }
+
+      async function syncAllFromSupabase(silent = true) {
+        if (!sbClient) return;
+        try {
+          const [mRes, mnRes, oRes] = await Promise.all([
+            sbClient.from('kb_merchants').select('*').order('created_at', { ascending: false }),
+            sbClient.from('kb_menus').select('*').order('created_at', { ascending: false }),
+            sbClient.from('kb_orders').select('*').order('created_at', { ascending: false })
+          ]);
+          if (mRes.error || mnRes.error || oRes.error) throw (mRes.error || mnRes.error || oRes.error);
+
+          if (mRes.data && mRes.data.length > 0) {
+            state.merchants = mRes.data.map(r => ({
+              id: r.id, name: r.name, owner: r.owner, wa: r.wa,
+              category: r.category || 'Makanan Berat', address: r.address || '',
+              status: r.status || 'PENDING', note: r.note || '',
+              createdAt: (r.created_at || '').slice(0, 10), docs: r.docs || {}
+            }));
+          } else {
+            await sbClient.from('kb_merchants').upsert(state.merchants.map(m => ({
+              id: m.id, name: m.name, owner: m.owner, wa: m.wa,
+              category: m.category, address: m.address, status: m.status, note: m.note, docs: m.docs || {}
+            })));
+          }
+
+          if (mnRes.data && mnRes.data.length > 0) {
+            state.menus = mnRes.data.map(r => ({
+              id: r.id, merchantId: r.merchant_id, name: r.name,
+              category: r.category || 'Makanan Berat', price: Number(r.price) || 0,
+              desc: r.description || '', available: r.available !== false,
+              accent: 'from-bunta-red to-amber-600'
+            }));
+          } else {
+            await sbClient.from('kb_menus').upsert(state.menus.map(mn => ({
+              id: mn.id, merchant_id: mn.merchantId, name: mn.name,
+              category: mn.category, price: mn.price, description: mn.desc, available: mn.available
+            })));
+          }
+
+          if (oRes.data && oRes.data.length > 0) {
+            state.orders = oRes.data.map(r => ({
+              id: r.id, createdAt: (r.created_at || '').replace('T', ' ').slice(0, 16),
+              customerName: r.customer_name, customerWa: r.customer_wa,
+              address: r.address, paymentMethod: r.payment_method,
+              merchantId: r.merchant_id, courierId: r.courier_id || '',
+              status: r.status || 'Menunggu Konfirmasi', items: r.items || [],
+              subtotal: Number(r.subtotal) || 0, deliveryFee: Number(r.delivery_fee) || 0,
+              serviceFee: Number(r.service_fee) || 0, total: Number(r.total) || 0
+            }));
+          } else {
+            await sbClient.from('kb_orders').upsert(state.orders.map(o => ({
+              id: o.id, customer_name: o.customerName, customer_wa: o.customerWa,
+              address: o.address, payment_method: o.paymentMethod, merchant_id: o.merchantId,
+              courier_id: o.courierId || '', status: o.status, items: o.items || [],
+              subtotal: o.subtotal, delivery_fee: o.deliveryFee, service_fee: o.serviceFee, total: o.total
+            })));
+          }
+
+          saveState();
+          renderAll();
+          if (!silent) showToast('Data tersinkron dengan Supabase.');
+        } catch (err) {
+          if (!silent) showToast('Sinkronisasi Supabase gagal, menggunakan mode lokal.', 'info');
+        }
+      }
+
+      async function pushMerchantToDb(m) {
+        if (!sbClient) return;
+        try {
+          await sbClient.from('kb_merchants').upsert({
+            id: m.id, name: m.name, owner: m.owner, wa: m.wa,
+            category: m.category, address: m.address, status: m.status, note: m.note || '', docs: m.docs || {}
+          });
+        } catch (e) {}
+      }
+
+      async function pushMenuToDb(mn) {
+        if (!sbClient) return;
+        try {
+          await sbClient.from('kb_menus').upsert({
+            id: mn.id, merchant_id: mn.merchantId, name: mn.name,
+            category: mn.category, price: mn.price, description: mn.desc, available: mn.available
+          });
+        } catch (e) {}
+      }
+
+      async function deleteMenuFromDb(id) {
+        if (!sbClient) return;
+        try { await sbClient.from('kb_menus').delete().eq('id', id); } catch (e) {}
+      }
+
+      async function pushOrderToDb(o) {
+        if (!sbClient) return;
+        try {
+          await sbClient.from('kb_orders').upsert({
+            id: o.id, customer_name: o.customerName, customer_wa: o.customerWa,
+            address: o.address, payment_method: o.paymentMethod, merchant_id: o.merchantId,
+            courier_id: o.courierId || '', status: o.status, items: o.items || [],
+            subtotal: o.subtotal, delivery_fee: o.deliveryFee, service_fee: o.serviceFee, total: o.total
+          });
+        } catch (e) {}
       }
 
       function statusBadge(status) {
@@ -863,6 +968,7 @@
             total: subtotal + deliveryFee + serviceFee
           };
           state.orders.unshift(newOrder);
+          pushOrderToDb(newOrder);
           addAudit(newOrder.customerName, `Membuat pesanan baru ${orderId} senilai ${formatRp(newOrder.total)}.`);
           cart = [];
           document.getElementById('checkout-form').reset();
@@ -911,6 +1017,7 @@
             docs: { ktp: pendingDocs.ktp, selfie: pendingDocs.selfie, nib: pendingDocs.nib }
           };
           state.merchants.unshift(newM);
+          pushMerchantToDb(newM);
           pendingDocs.ktp = ''; pendingDocs.selfie = ''; pendingDocs.nib = '';
           document.getElementById('lbl-ktp-file').textContent = 'Pilih gambar';
           document.getElementById('lbl-selfie-file').textContent = 'Pilih gambar';
@@ -930,6 +1037,7 @@
           const ord = state.orders.find(o => o.id === orderId);
           if (!ord) return;
           ord.status = nextStatus;
+          pushOrderToDb(ord);
           addAudit('Merchant', `Mengubah status pesanan ${orderId} menjadi "${nextStatus}".`);
           showToast(`Pesanan ${orderId} → ${nextStatus}`);
           renderAll();
@@ -942,12 +1050,14 @@
             const mn = state.menus.find(x => x.id === togBtn.dataset.toggleMenu);
             if (mn) {
               mn.available = !mn.available;
+              pushMenuToDb(mn);
               addAudit('Merchant', `Mengubah stok ${mn.name} menjadi ${mn.available ? 'Tersedia' : 'Habis'}.`);
               renderAll();
             }
           } else if (delBtn) {
             const id = delBtn.dataset.delMenu;
             state.menus = state.menus.filter(x => x.id !== id);
+            deleteMenuFromDb(id);
             addAudit('Merchant', `Menghapus menu ${id}.`);
             showToast('Menu dihapus.', 'info');
             renderAll();
@@ -978,6 +1088,7 @@
             accent: 'from-bunta-red to-amber-600'
           };
           state.menus.unshift(newMenu);
+          pushMenuToDb(newMenu);
           addAudit('Merchant', `Menambahkan menu baru: ${newMenu.name} (${formatRp(newMenu.price)}).`);
           e.target.reset();
           document.getElementById('modal-add-menu').classList.add('hidden');
@@ -1015,6 +1126,7 @@
           if (!ord || !kur) return;
           ord.courierId = kId;
           ord.status = 'Sedang Diantar';
+          pushOrderToDb(ord);
           addAudit(`Kurir ${kur.name}`, `Mengambil & mengantar pesanan ${ord.id}.`);
           showToast(`Pesanan ${ord.id} sedang Anda antar!`);
           renderAll();
@@ -1026,6 +1138,7 @@
           const ord = state.orders.find(o => o.id === btn.dataset.kurirDone);
           if (!ord) return;
           ord.status = 'Selesai';
+          pushOrderToDb(ord);
           const kur = state.couriers.find(c => c.id === ord.courierId);
           if (kur) kur.completed = (kur.completed || 0) + 1;
           addAudit(kur ? `Kurir ${kur.name}` : 'Kurir', `Menyelesaikan pengantaran ${ord.id}.`);
@@ -1078,6 +1191,7 @@
             const nextStatus = btn.dataset.reviewAction;
             m.status = nextStatus;
             m.note = document.getElementById('rev-note').value.trim();
+            pushMerchantToDb(m);
             addAudit('Admin', `Keputusan KYC merchant "${m.name}" → ${nextStatus}.`);
             document.getElementById('modal-merchant-review').classList.add('hidden');
             showToast(`Status merchant ${m.name} diperbarui ke ${nextStatus}.`);
@@ -1114,5 +1228,6 @@
         initSupabase();
         bindEvents();
         renderAll();
+        syncAllFromSupabase(true);
       });
     })();
